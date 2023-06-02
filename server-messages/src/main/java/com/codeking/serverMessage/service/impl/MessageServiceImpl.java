@@ -1,60 +1,76 @@
 package com.codeking.serverMessage.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.codeking.serverMessage.entity.Messages;
-import com.codeking.serverMessage.mapper.MessageMapper;
+import com.codeking.serverMessage.entity.Message;
 import com.codeking.serverMessage.service.MessageService;
+import org.redisson.api.RKeys;
+import org.redisson.api.RMap;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 
-/**
- * @author CodeKing
- * @since 2023/5/31  22:42
- */
 @Service
-public class MessageServiceImpl extends ServiceImpl<MessageMapper, Messages> implements MessageService {
+public class MessageServiceImpl implements MessageService {
+
+    private static final String MESSAGE_KEY_PREFIX = "messages:";
+
     @Autowired
-    private MessageMapper messageMapper;
+    private final RedissonClient redissonClient;
+
+    public MessageServiceImpl(RedissonClient redissonClient) {
+        this.redissonClient = redissonClient;
+    }
 
     @Override
-    public void sendMessage(Long senderId, Long receiveId, String subject, String content) {
-        // 创建站内信实体对象
-        Messages messages = new Messages();
-        messages.setSenderId(senderId);
-        messages.setReceiveId(receiveId);
-        messages.setSubject(subject);
-        messages.setContent(content);
-        // 先手动实现时间
-        //messages.setSentTime(LocalDateTime.now());
-        // 保存消息到数据库
-        messageMapper.insert(messages);
+    public void sendMessage(Message message) {
+        RMap<Integer, Message> messagesMap = redissonClient.getMap(MESSAGE_KEY_PREFIX + message.getReceiverId());
+        messagesMap.put(message.getMessageId(), message);
     }
 
-    // 获取站内信
-    public List<Messages> getMessages(Long messageId) {
-        // 根据用户ID查询站内信列表
-        QueryWrapper<Messages> queryWrapper = new QueryWrapper<>();
-        queryWrapper.eq("message_id", messageId);
-        queryWrapper.orderByDesc("sent_time");
-        return messageMapper.selectList(queryWrapper);
+    @Override
+    public List<Message> getReceivedMessages(int receiverId) {
+        RMap<Integer, Message> messagesMap = redissonClient.getMap(MESSAGE_KEY_PREFIX + receiverId);
+        return new ArrayList<>(messagesMap.values());
     }
 
-    // 标记已读
-    public void markMessageAsRead(Long messageId) {
-        // 根据站内信ID更新状态为已读
-        Messages messages = messageMapper.selectById(messageId);
-        if (messages != null) {
-            messages.setRead(true);
-            messageMapper.updateById(messages);
+    @Override
+    public List<Message> getSentMessages(int senderId) {
+        RMap<Integer, Message> messagesMap = redissonClient.getMap(MESSAGE_KEY_PREFIX + senderId);
+        return new ArrayList<>(messagesMap.values());
+    }
+
+    @Override
+    public void markAsRead(int messageId) {
+        RMap<Integer, Message> messagesMap = getMessagesMapContainingMessage(messageId);
+        if (messagesMap != null) {
+            Message message = messagesMap.get(messageId);
+            if (message != null) {
+                message.setRead(true);
+                messagesMap.put(messageId, message);
+            }
         }
     }
 
-    public void deleteMessage(Long messageId) {
-        // 根据站内信ID删除站内信
-        messageMapper.deleteById(messageId);
+    @Override
+    public void deleteMessage(int messageId) {
+        RMap<Integer, Message> messagesMap = getMessagesMapContainingMessage(messageId);
+        if (messagesMap != null) {
+            messagesMap.remove(messageId);
+        }
+    }
+
+    private RMap<Integer, Message> getMessagesMapContainingMessage(int messageId) {
+        RKeys keys = redissonClient.getKeys();
+        Iterable<String> messageKeyIterable = keys.getKeysByPattern(MESSAGE_KEY_PREFIX + "*");
+        for (String messageKey : messageKeyIterable) {
+            RMap<Integer, Message> messagesMap = redissonClient.getMap(messageKey);
+            if (messagesMap.containsKey(messageId)) {
+                return messagesMap;
+            }
+        }
+        return null;
     }
 
 }
